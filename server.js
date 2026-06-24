@@ -141,9 +141,10 @@ function _continueStartBot(botId, botDir) {
       _spawnBot(botId, language, entry);
     });
   } else if (language === "python") {
+    const pythonCmd = process.platform === "win32" ? "python" : "python3";
     if (!fs.existsSync(reqPath)) {
       botLog(botId, "🔍 Génération automatique des dépendances...", "info");
-      const reqs = spawn("python", ["-m", "pipreqs.pipreqs", ".", "--force"], { cwd: botDir, shell: true });
+      const reqs = spawn(pythonCmd, ["-m", "pipreqs.pipreqs", ".", "--force"], { cwd: botDir, shell: true });
       reqs.on("close", () => {
          _installPythonDepsAndSpawn(botId, botDir, language, entry);
       });
@@ -164,7 +165,8 @@ function _installPythonDepsAndSpawn(botId, botDir, language, entry) {
   }
   
   botLog(botId, "📦 Installation des dépendances (pip)...", "info");
-  const install = spawn("python", ["-m", "pip", "install", "-r", "requirements.txt"], { cwd: botDir, shell: true });
+  const pythonCmd = process.platform === "win32" ? "python" : "python3";
+  const install = spawn(pythonCmd, ["-m", "pip", "install", "-r", "requirements.txt"], { cwd: botDir, shell: true });
   install.stdout.on("data", (d) => d.toString().split("\n").filter(Boolean).forEach((l) => botLog(botId, l, "log")));
   install.stderr.on("data", (d) => d.toString().split("\n").filter(Boolean).forEach((l) => botLog(botId, l, "error")));
   install.on("close", (code) => {
@@ -188,7 +190,8 @@ function _spawnBot(botId, language, entry) {
     NODE_ENV: "production",
   };
 
-  const command = language === "python" ? "python" : "node";
+  const pythonCmd = process.platform === "win32" ? "python" : "python3";
+  const command = language === "python" ? pythonCmd : "node";
   const proc = spawn(command, [entry], { cwd: botDir, env, shell: true });
   bot.process = proc;
 
