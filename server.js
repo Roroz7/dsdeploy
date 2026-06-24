@@ -129,6 +129,8 @@ function _continueStartBot(botId, botDir) {
   if (language === "node" && fs.existsSync(pkgPath)) {
     botLog(botId, "📦 Installation des dépendances (npm)...", "info");
     const install = spawn("npm", ["install", "--silent"], { cwd: botDir, shell: true });
+    install.stdout.on("data", (d) => d.toString().split("\n").filter(Boolean).forEach((l) => botLog(botId, l, "log")));
+    install.stderr.on("data", (d) => d.toString().split("\n").filter(Boolean).forEach((l) => botLog(botId, l, "error")));
     install.on("close", (code) => {
       if (code !== 0) {
         botLog(botId, "❌ npm install a échoué", "error");
@@ -138,21 +140,42 @@ function _continueStartBot(botId, botDir) {
       botLog(botId, "✅ Dépendances installées", "info");
       _spawnBot(botId, language, entry);
     });
-  } else if (language === "python" && fs.existsSync(reqPath)) {
-    botLog(botId, "📦 Installation des dépendances (pip)...", "info");
-    const install = spawn("python", ["-m", "pip", "install", "-r", "requirements.txt"], { cwd: botDir, shell: true });
-    install.on("close", (code) => {
-      if (code !== 0) {
-        botLog(botId, "❌ pip install a échoué", "error");
-        botStatus(botId, "error");
-        return;
-      }
-      botLog(botId, "✅ Dépendances installées", "info");
-      _spawnBot(botId, language, entry);
-    });
+  } else if (language === "python") {
+    if (!fs.existsSync(reqPath)) {
+      botLog(botId, "🔍 Génération automatique des dépendances...", "info");
+      const reqs = spawn("python", ["-m", "pipreqs.pipreqs", ".", "--force"], { cwd: botDir, shell: true });
+      reqs.on("close", () => {
+         _installPythonDepsAndSpawn(botId, botDir, language, entry);
+      });
+    } else {
+       _installPythonDepsAndSpawn(botId, botDir, language, entry);
+    }
   } else {
     _spawnBot(botId, language, entry);
   }
+}
+
+function _installPythonDepsAndSpawn(botId, botDir, language, entry) {
+  const reqPath = path.join(botDir, "requirements.txt");
+  if (!fs.existsSync(reqPath)) {
+    // Si toujours pas de requirements.txt, c'est qu'il n'y a pas de deps externes
+    _spawnBot(botId, language, entry);
+    return;
+  }
+  
+  botLog(botId, "📦 Installation des dépendances (pip)...", "info");
+  const install = spawn("python", ["-m", "pip", "install", "-r", "requirements.txt"], { cwd: botDir, shell: true });
+  install.stdout.on("data", (d) => d.toString().split("\n").filter(Boolean).forEach((l) => botLog(botId, l, "log")));
+  install.stderr.on("data", (d) => d.toString().split("\n").filter(Boolean).forEach((l) => botLog(botId, l, "error")));
+  install.on("close", (code) => {
+    if (code !== 0) {
+      botLog(botId, "❌ pip install a échoué", "error");
+      botStatus(botId, "error");
+      return;
+    }
+    botLog(botId, "✅ Dépendances installées", "info");
+    _spawnBot(botId, language, entry);
+  });
 }
 
 function _spawnBot(botId, language, entry) {
