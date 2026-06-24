@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Discord Deployer</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="sidebar">
+    <div class="logo">
+      <span class="logo-icon">🤖</span>
+      <span>Discord<br/><b>Deployer</b></span>
+    </div>
+
+    <div class="deploy-zone" id="deployZone">
+      <div class="dz-inner" id="dzInner">
+        <div class="dz-icon">📦</div>
+        <p>Glisse ton ZIP ici<br/>ou clique pour choisir</p>
+        <input type="file" id="fileInput" accept=".zip" hidden />
+        <button class="btn btn-primary" onclick="document.getElementById('fileInput').click()">
+          Choisir un fichier
+        </button>
+        <div style="margin-top: 15px; font-size: 0.9em; opacity: 0.7;">OU</div>
+        <button class="btn btn-ghost" style="margin-top: 5px;" onclick="showGithubForm()">
+          Déployer depuis GitHub
+        </button>
+      </div>
+    </div>
+
+    <div id="uploadForm" class="upload-form hidden">
+      <h3 id="formTitle">Déployer un bot</h3>
+      
+      <div id="githubUrlContainer" class="hidden">
+        <label>URL du dépôt GitHub</label>
+        <input type="text" id="repoUrl" placeholder="https://github.com/user/repo" />
+      </div>
+
+      <label>Nom du bot</label>
+      <input type="text" id="botName" placeholder="mon-bot" />
+      <label>Token Discord <span class="opt">(optionnel)</span></label>
+      <input type="password" id="botToken" placeholder="votre token" />
+      <label>Variables d'env <span class="opt">(JSON)</span></label>
+      <textarea id="botEnv" placeholder='{"PREFIX": "!", "GUILD_ID": "..."}'></textarea>
+      <div class="form-actions">
+        <button class="btn btn-ghost" onclick="cancelDeploy()">Annuler</button>
+        <button class="btn btn-primary" onclick="deployBot()">🚀 Déployer</button>
+      </div>
+    </div>
+
+    <div class="bot-list" id="botList">
+      <p class="empty-list">Aucun bot déployé</p>
+    </div>
+  </div>
+
+  <div class="main">
+    <div class="placeholder" id="placeholder">
+      <div class="ph-icon">🎮</div>
+      <h2>Discord Deployer</h2>
+      <p>Déploie tes bots Discord en local<br/>en quelques secondes</p>
+      <div class="steps">
+        <div class="step"><span>1</span> Glisse un fichier ZIP de ton bot</div>
+        <div class="step"><span>2</span> Configure le token &amp; les variables</div>
+        <div class="step"><span>3</span> Clique sur Déployer et c'est parti !</div>
+      </div>
+    </div>
+
+    <div class="bot-panel hidden" id="botPanel">
+      <div class="panel-header">
+        <div class="panel-title">
+          <div class="status-dot" id="panelDot"></div>
+          <h2 id="panelName"></h2>
+          <span class="badge" id="panelBadge"></span>
+        </div>
+        <div class="panel-actions">
+          <button class="btn btn-success" id="btnStart" onclick="actionBot('start')">▶ Start</button>
+          <button class="btn btn-warning" id="btnRestart" onclick="actionBot('restart')">↺ Restart</button>
+          <button class="btn btn-danger" id="btnStop" onclick="actionBot('stop')">■ Stop</button>
+          <button class="btn btn-ghost" onclick="deleteBot()">🗑</button>
+        </div>
+      </div>
+
+      <div class="panel-tabs">
+        <button class="tab active" onclick="setTab('logs', this)">Logs</button>
+        <button class="tab" onclick="setTab('config', this)">Config</button>
+      </div>
+
+      <div id="tabLogs" class="tab-content">
+        <div class="log-toolbar">
+          <label><input type="checkbox" id="autoScroll" checked /> Auto-scroll</label>
+          <button class="btn btn-ghost btn-sm" onclick="clearLogs()">🗑 Effacer</button>
+        </div>
+        <div class="log-container" id="logContainer"></div>
+      </div>
+
+      <div id="tabConfig" class="tab-content hidden">
+        <div class="config-form">
+          <label>Fichier d'entrée</label>
+          <input type="text" id="cfgEntry" placeholder="Auto-détecté (main.py, index.js...)" />
+          <label>Token Discord</label>
+          <input type="password" id="cfgToken" placeholder="votre token" />
+          <label>Variables d'environnement (JSON)</label>
+          <textarea id="cfgEnv" rows="6" placeholder='{"PREFIX": "!", "GUILD_ID": "..."}'></textarea>
+          <label>
+            <input type="checkbox" id="cfgAutoRestart" />
+            Redémarrage automatique en cas de crash
+          </label>
+          <button class="btn btn-primary" onclick="saveConfig()">💾 Sauvegarder</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="app.js"></script>
+</body>
+</html>
