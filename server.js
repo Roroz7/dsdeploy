@@ -9,12 +9,83 @@ const extract = require("extract-zip");
 const treeKill = require("tree-kill");
 const chokidar = require("chokidar");
 const crypto = require("crypto");
+const cron = require("node-cron");
 
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "admin";
 const AUTH_TOKEN = crypto.createHash("sha256").update(ADMIN_PASSWORD + "deployer_salt").digest("hex");
+const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL || null;
+
+async function sendWebhook(title, description, color) {
+  if (!DISCORD_WEBHOOK_URL) return;
+  try {
+    await fetch(DISCORD_WEBHOOK_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ embeds: [{ title, description, color }] })
+    });
+  } catch (err) {
+    console.error("Webhook failed:", err);
+  }
+}
 
 const app = express();
 const server = http.createServer(app);
+
+// ── Fichiers (Web IDE) ────────────────────────────────────────────────────────
+
+function walkDir(dir, baseDir = dir) {
+  let results = [];
+  const list = fs.readdirSync(dir);
+  list.forEach((file) => {
+    if (file === "node_modules" || file === "venv" || file === ".git" || file === "__pycache__") return;
+    const fullPath = path.join(dir, file);
+    const stat = fs.statSync(fullPath);
+    if (stat && stat.isDirectory()) {
+      results = results.concat(walkDir(fullPath, baseDir));
+    } else {
+      results.push(path.relative(baseDir, fullPath).replace(/\\/g, "/"));
+    }
+  });
+  return results;
+}
+
+app.get("/api/bots/:id/files", authMiddleware, (req, res) => {
+  const botDir = path.join(BOTS_DIR, req.params.id);
+  if (!fs.existsSync(botDir)) return res.status(404).json({ error: "Dossier introuvable" });
+  try {
+    const files = walkDir(botDir);
+    res.json(files);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/api/bots/:id/files/read", authMiddleware, (req, res) => {
+  const filePath = req.query.path;
+  if (!filePath || filePath.includes("..")) return res.status(400).json({ error: "Chemin invalide" });
+  const fullPath = path.join(BOTS_DIR, req.params.id, filePath);
+  if (!fs.existsSync(fullPath)) return res.status(404).json({ error: "Fichier introuvable" });
+  try {
+    res.send(fs.readFileSync(fullPath, "utf8"));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put("/api/bots/:id/files/write", authMiddleware, (req, res) => {
+  const filePath = req.body.path;
+  const content = req.body.content;
+  if (!filePath || filePath.includes("..")) return res.status(400).json({ error: "Chemin invalide" });
+  const fullPath = path.join(BOTS_DIR, req.params.id, filePath);
+  try {
+    fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+    fs.writeFileSync(fullPath, content, "utf8");
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 const wss = new ws.WebSocketServer({ server });
 
 app.use(express.json());
@@ -262,9 +333,15 @@ function _spawnBot(botId, language, entry, venvPython = null) {
     botLog(botId, `⏹ Processus terminé (code ${code})`, crashed ? "error" : "info");
     botStatus(botId, crashed ? "crashed" : "stopped");
 
-    if (crashed && bot.config.autoRestart) {
-      botLog(botId, "🔄 Redémarrage automatique dans 3s...", "info");
-      setTimeout(() => startBot(botId), 3000);
+    // Auto-restart si activé
+    if (crashed) {
+      const lastLogs = bot.logs.filter(l => l.type === 'error').slice(-5).map(l => l.line).join("\\n");
+      sendWebhook(`❌ Crash: ${bot.config.name || botId}`, `Le processus s'est arrêté avec une erreur.\n\`\`\`\n${lastLogs.substring(0, 1000)}\n\`\`\``, 0xda373c);
+      
+      if (bot.config.autoRestart) {
+        botLog(botId, "🔄 Redémarrage automatique dans 3s...", "info");
+        setTimeout(() => startBot(botId), 3000);
+      }
     }
   });
 }
@@ -313,6 +390,15 @@ app.get("/api/bots/:id/logs", authMiddleware, (req, res) => {
   res.json(bot.logs);
 });
 
+// STDIN
+app.post("/api/bots/:id/stdin", authMiddleware, (req, res) => {
+  const bot = bots[req.params.id];
+  if (bot?.process) {
+    bot.process.stdin.write(req.body.input + "\n");
+    res.json({ ok: true });
+  } else res.status(400).json({ error: "Bot non actif" });
+});
+
 // Déployer un bot (upload ZIP)
 app.post("/api/deploy", authMiddleware, upload.single("archive"), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: "Aucun fichier" });
@@ -320,45 +406,39 @@ app.post("/api/deploy", authMiddleware, upload.single("archive"), async (req, re
   const rawName = req.body.name || path.basename(req.file.originalname, ".zip");
   const botId = rawName.replace(/[^a-zA-Z0-9_-]/g, "_").toLowerCase();
   const botDir = path.join(BOTS_DIR, botId);
+  const tmpDir = path.join(BOTS_DIR, `${botId}_tmp`);
 
   try {
-    if (bots[botId]?.process) stopBot(botId);
-    await new Promise((r) => setTimeout(r, 500));
-
-    fs.mkdirSync(botDir, { recursive: true });
-    await extract(req.file.path, { dir: botDir });
+    if (fs.existsSync(tmpDir)) fs.rmSync(tmpDir, { recursive: true, force: true });
+    fs.mkdirSync(tmpDir, { recursive: true });
+    await extract(req.file.path, { dir: tmpDir });
     fs.unlinkSync(req.file.path);
 
-    const contents = fs.readdirSync(botDir);
-    if (contents.length === 1) {
-      const sub = path.join(botDir, contents[0]);
-      if (fs.statSync(sub).isDirectory()) {
-        fs.readdirSync(sub).forEach((f) =>
-          fs.renameSync(path.join(sub, f), path.join(botDir, f))
-        );
-        fs.rmdirSync(sub);
-      }
+    const contents = fs.readdirSync(tmpDir);
+    if (contents.length === 1 && fs.statSync(path.join(tmpDir, contents[0])).isDirectory()) {
+      const sub = path.join(tmpDir, contents[0]);
+      fs.readdirSync(sub).forEach((f) => fs.renameSync(path.join(sub, f), path.join(tmpDir, f)));
+      fs.rmdirSync(sub);
     }
 
-    const cfgPath = path.join(botDir, "deployer.json");
+    const cfgPath = path.join(tmpDir, "deployer.json");
     const config = fs.existsSync(cfgPath)
       ? JSON.parse(fs.readFileSync(cfgPath, "utf8"))
-      : {
-          name: rawName,
-          entry: null,
-          autoRestart: false,
-          env: {},
-        };
+      : { name: rawName, entry: null, autoRestart: false, env: {} };
     config.projectType = req.body.projectType || config.projectType || 'bot';
+
     if (req.body.token) config.env = { ...config.env, DISCORD_TOKEN: req.body.token };
     if (req.body.env) {
-      try {
-        Object.assign(config.env, JSON.parse(req.body.env));
-      } catch {}
+      try { Object.assign(config.env, JSON.parse(req.body.env)); } catch {}
     }
-
-    config.name = config.name || rawName;
     fs.writeFileSync(cfgPath, JSON.stringify(config, null, 2));
+
+    // Zero Downtime Swap
+    if (bots[botId]?.process) stopBot(botId);
+    await new Promise((r) => setTimeout(r, 500));
+    
+    if (fs.existsSync(botDir)) fs.rmSync(botDir, { recursive: true, force: true });
+    fs.renameSync(tmpDir, botDir);
 
     bots[botId] = { process: null, status: "deployed", logs: [], config };
     broadcast({ event: "deployed", botId, name: config.name });
@@ -378,32 +458,33 @@ app.post("/api/deploy/github", authMiddleware, async (req, res) => {
   const rawName = name || repoUrl.split("/").pop().replace(".git", "");
   const botId = rawName.replace(/[^a-zA-Z0-9_-]/g, "_").toLowerCase();
   const botDir = path.join(BOTS_DIR, botId);
+  const tmpDir = path.join(BOTS_DIR, `${botId}_tmp`);
 
   try {
-    if (bots[botId]?.process) stopBot(botId);
-    await new Promise((r) => setTimeout(r, 500));
+    if (fs.existsSync(tmpDir)) fs.rmSync(tmpDir, { recursive: true, force: true });
 
-    if (fs.existsSync(botDir)) {
-      fs.rmSync(botDir, { recursive: true, force: true });
-    }
-
-    const clone = spawn("git", ["clone", repoUrl, botDir], { shell: true });
-    clone.on("close", (code) => {
+    const clone = spawn("git", ["clone", repoUrl, tmpDir], { shell: true });
+    clone.on("close", async (code) => {
       if (code !== 0) {
         return res.status(500).json({ error: "Erreur lors du git clone. Vérifiez l'URL du dépôt." });
       }
 
-      const cfgPath = path.join(botDir, "deployer.json");
+      const cfgPath = path.join(tmpDir, "deployer.json");
       const config = { name: rawName, entry: "", autoRestart: false, env: {}, repoUrl, projectType: req.body.projectType || 'bot' };
 
       if (token) config.env.DISCORD_TOKEN = token;
       if (env) {
-        try {
-          Object.assign(config.env, JSON.parse(env));
-        } catch {}
+        try { Object.assign(config.env, JSON.parse(env)); } catch {}
       }
 
       fs.writeFileSync(cfgPath, JSON.stringify(config, null, 2));
+
+      // Zero Downtime Swap
+      if (bots[botId]?.process) stopBot(botId);
+      await new Promise((r) => setTimeout(r, 500));
+      
+      if (fs.existsSync(botDir)) fs.rmSync(botDir, { recursive: true, force: true });
+      fs.renameSync(tmpDir, botDir);
 
       bots[botId] = { process: null, status: "deployed", logs: [], config };
       broadcast({ event: "deployed", botId, name: config.name });
@@ -453,13 +534,21 @@ app.delete("/api/bots/:id", authMiddleware, (req, res) => {
   res.json({ ok: true });
 });
 
-// Mettre à jour la config
-app.patch("/api/bots/:id/config", (req, res) => {
+// Mettre à jour la Config
+app.patch("/api/bots/:id/config", authMiddleware, (req, res) => {
   const bot = bots[req.params.id];
   if (!bot) return res.status(404).json({ error: "Bot introuvable" });
-  Object.assign(bot.config, req.body);
-  const cfgPath = path.join(BOTS_DIR, req.params.id, "deployer.json");
-  fs.writeFileSync(cfgPath, JSON.stringify(bot.config, null, 2));
+
+  if (req.body.entry !== undefined) bot.config.entry = req.body.entry;
+  if (req.body.autoRestart !== undefined) bot.config.autoRestart = req.body.autoRestart;
+  if (req.body.env !== undefined) bot.config.env = req.body.env;
+  if (req.body.projectType !== undefined) bot.config.projectType = req.body.projectType;
+  if (req.body.cron !== undefined) {
+    bot.config.cron = req.body.cron;
+    scheduleCron(req.params.id);
+  }
+
+  saveBots();
   res.json({ ok: true });
 });
 

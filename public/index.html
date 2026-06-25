@@ -3,13 +3,15 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Script Deployer</title>
+  <title>Script Deployer Python & Node</title>
   <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/codemirror.min.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/theme/dracula.min.css" />
 </head>
 <body>
   <div class="sidebar">
     <div class="logo">
-      <span class="logo-icon">📜</span>
+      <span class="logo-icon">🤖</span>
       <span>Script<br/><b>Deployer</b></span>
     </div>
 
@@ -64,12 +66,12 @@
 
   <div class="main">
     <div class="placeholder" id="placeholder">
-      <div class="ph-icon">⚙️</div>
-      <h2>Python & Node Deployer</h2>
-      <p>Déploie tes scripts pythons & nodes<br/>en quelques secondes</p>
+      <div class="ph-icon">🎮</div>
+      <h2>Script Deployer Python & Node</h2>
+      <p>Déploie tes bots Discord et tes scripts Python/Node en local<br/>en quelques secondes</p>
       <div class="steps">
-        <div class="step"><span>1</span> Glisse un fichier ZIP de ton script</div>
-        <div class="step"><span>2</span> Configure le fichier de démarrage &amp; les variables</div>
+        <div class="step"><span>1</span> Glisse un fichier ZIP de ton bot</div>
+        <div class="step"><span>2</span> Configure le token &amp; les variables</div>
         <div class="step"><span>3</span> Clique sur Déployer et c'est parti !</div>
       </div>
     </div>
@@ -92,6 +94,7 @@
       <div class="panel-tabs">
         <button class="tab active" onclick="setTab('logs', this)">Logs</button>
         <button class="tab" onclick="setTab('config', this)">Config</button>
+        <button class="tab" onclick="setTab('files', this)">Fichiers</button>
       </div>
 
       <div id="tabLogs" class="tab-content">
@@ -100,6 +103,9 @@
           <button class="btn btn-ghost btn-sm" onclick="clearLogs()">🗑 Effacer</button>
         </div>
         <div class="log-container" id="logContainer"></div>
+        <div class="stdin-container">
+          <input type="text" id="stdinInput" placeholder="Envoyer une commande au processus..." onkeypress="handleStdin(event)" />
+        </div>
       </div>
 
       <div id="tabConfig" class="tab-content hidden">
@@ -112,11 +118,29 @@
           </div>
           <label>Variables d'environnement (JSON)</label>
           <textarea id="cfgEnv" rows="6" placeholder='{"PREFIX": "!", "GUILD_ID": "..."}'></textarea>
+          <label>Tâche planifiée (Format Cron)</label>
+          <input type="text" id="cfgCron" placeholder="ex: 0 * * * * (optionnel)" />
           <label>
             <input type="checkbox" id="cfgAutoRestart" />
             Redémarrage automatique en cas de crash
           </label>
           <button class="btn btn-primary" onclick="saveConfig()">💾 Sauvegarder</button>
+        </div>
+      </div>
+
+      <div id="tabFiles" class="tab-content hidden">
+        <div class="ide-container">
+          <div class="ide-sidebar">
+            <div class="ide-sidebar-header">Explorateur</div>
+            <div id="fileList" class="file-list"></div>
+          </div>
+          <div class="ide-editor">
+            <div class="ide-editor-header">
+              <span id="currentFileName">Aucun fichier sélectionné</span>
+              <button class="btn btn-success btn-sm" onclick="saveFile()">💾 Sauvegarder le fichier</button>
+            </div>
+            <textarea id="codeEditor"></textarea>
+          </div>
         </div>
       </div>
     </div>
@@ -135,6 +159,9 @@
     </div>
   </div>
 
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/codemirror.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/mode/javascript/javascript.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/mode/python/python.min.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

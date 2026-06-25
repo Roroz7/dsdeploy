@@ -6,6 +6,8 @@ let botsData = {};
 let ws;
 let currentViewType = "bot";
 let authToken = localStorage.getItem("deployer_token") || null;
+let codeEditorInstance = null;
+let currentOpenedFile = null;
 
 // ── Auth & Fetch ──────────────────────────────────────────────────────────────
 async function login() {
@@ -138,10 +140,17 @@ async function selectBot(botId) {
   document.getElementById("cfgEntry").value = bot.entry || "";
   document.getElementById("cfgToken").value = bot.env?.DISCORD_TOKEN || "";
   document.getElementById("cfgAutoRestart").checked = bot.autoRestart || false;
+  document.getElementById("cfgCron").value = bot.cron || "";
   const envCopy = { ...(bot.env || {}) };
   delete envCopy.DISCORD_TOKEN;
   document.getElementById("cfgEnv").value =
     Object.keys(envCopy).length ? JSON.stringify(envCopy, null, 2) : "";
+
+  // Reset IDE
+  if (codeEditorInstance) codeEditorInstance.setValue("");
+  currentOpenedFile = null;
+  document.getElementById("currentFileName").textContent = "Aucun fichier sélectionné";
+  document.getElementById("fileList").innerHTML = "";
 }
 
 function showPlaceholder() {
@@ -192,6 +201,19 @@ function clearLogs() {
   document.getElementById("logContainer").innerHTML = "";
 }
 
+// ── Stdin ─────────────────────────────────────────────────────────────────────
+async function handleStdin(e) {
+  if (e.key === "Enter") {
+    const input = e.target.value;
+    if (!input || !currentBotId) return;
+    e.target.value = "";
+    await authFetch(`/api/bots/${currentBotId}/stdin`, {
+      method: "POST",
+      body: JSON.stringify({ input })
+    });
+  }
+}
+
 // ── Actions bot ───────────────────────────────────────────────────────────────
 async function actionBot(action) {
   if (!currentBotId) return;
@@ -209,6 +231,7 @@ async function saveConfig() {
   if (!currentBotId) return;
   const entry = document.getElementById("cfgEntry").value || "";
   const token = document.getElementById("cfgToken").value;
+  const cronExpr = document.getElementById("cfgCron").value;
   const autoRestart = document.getElementById("cfgAutoRestart").checked;
   let env = {};
   try {
@@ -221,11 +244,12 @@ async function saveConfig() {
 
   await authFetch(`/api/bots/${currentBotId}/config`, {
     method: "PATCH",
-    body: JSON.stringify({ entry, autoRestart, env }),
+    body: JSON.stringify({ entry, autoRestart, cron: cronExpr, env }),
   });
 
   botsData[currentBotId].entry = entry;
   botsData[currentBotId].autoRestart = autoRestart;
+  botsData[currentBotId].cron = cronExpr;
   botsData[currentBotId].env = env;
   toast("✅ Config sauvegardée !", "success");
 }
@@ -346,12 +370,65 @@ function switchSidebarTab(type) {
   showPlaceholder();
 }
 
+// ── Web IDE ───────────────────────────────────────────────────────────────────
+async function loadFiles() {
+  if (!currentBotId) return;
+  const res = await authFetch(`/api/bots/${currentBotId}/files`);
+  const files = await res.json();
+  const el = document.getElementById("fileList");
+  if (files.error) {
+    el.innerHTML = '<p class="empty-list">Erreur de chargement</p>';
+    return;
+  }
+  el.innerHTML = files.map(f => `<div class="file-item" onclick="openFile('${f}')">${f}</div>`).join("");
+}
+
+async function openFile(path) {
+  if (!currentBotId) return;
+  const res = await authFetch(`/api/bots/${currentBotId}/files/read?path=${encodeURIComponent(path)}`);
+  const content = await res.text();
+  
+  currentOpenedFile = path;
+  document.getElementById("currentFileName").textContent = path;
+  
+  if (!codeEditorInstance) {
+    codeEditorInstance = CodeMirror.fromTextArea(document.getElementById("codeEditor"), {
+      lineNumbers: true,
+      theme: "dracula",
+      mode: path.endsWith('.py') ? "python" : "javascript"
+    });
+  }
+  
+  codeEditorInstance.setOption("mode", path.endsWith('.py') ? "python" : "javascript");
+  codeEditorInstance.setValue(content);
+  
+  document.querySelectorAll(".file-item").forEach(el => el.classList.remove("active"));
+  event.target.classList.add("active");
+}
+
+async function saveFile() {
+  if (!currentBotId || !currentOpenedFile || !codeEditorInstance) return;
+  const content = codeEditorInstance.getValue();
+  const res = await authFetch(`/api/bots/${currentBotId}/files/write`, {
+    method: "PUT",
+    body: JSON.stringify({ path: currentOpenedFile, content })
+  });
+  if (res.ok) toast("✅ Fichier sauvegardé !", "success");
+  else toast("❌ Erreur de sauvegarde", "error");
+}
+
 // ── Tabs ──────────────────────────────────────────────────────────────────────
 function setTab(tab, btn) {
   document.querySelectorAll(".tab").forEach((t) => t.classList.remove("active"));
   btn.classList.add("active");
   document.getElementById("tabLogs").classList.toggle("hidden", tab !== "logs");
   document.getElementById("tabConfig").classList.toggle("hidden", tab !== "config");
+  document.getElementById("tabFiles").classList.toggle("hidden", tab !== "files");
+  
+  if (tab === "files") {
+    loadFiles();
+    if (codeEditorInstance) setTimeout(() => codeEditorInstance.refresh(), 50);
+  }
 }
 
 // ── Toast ─────────────────────────────────────────────────────────────────────
