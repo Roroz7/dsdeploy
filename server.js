@@ -141,32 +141,60 @@ function _continueStartBot(botId, botDir) {
       _spawnBot(botId, language, entry);
     });
   } else if (language === "python") {
-    const pythonCmd = process.platform === "win32" ? "python" : "python3";
-    if (!fs.existsSync(reqPath)) {
-      botLog(botId, "🔍 Génération automatique des dépendances...", "info");
-      const reqs = spawn(pythonCmd, ["-m", "pipreqs.pipreqs", ".", "--force"], { cwd: botDir, shell: true });
-      reqs.on("close", () => {
-         _installPythonDepsAndSpawn(botId, botDir, language, entry);
-      });
-    } else {
-       _installPythonDepsAndSpawn(botId, botDir, language, entry);
-    }
+    _setupPythonVenvAndSpawn(botId, botDir, language, entry);
   } else {
     _spawnBot(botId, language, entry);
   }
 }
 
-function _installPythonDepsAndSpawn(botId, botDir, language, entry) {
+function _setupPythonVenvAndSpawn(botId, botDir, language, entry) {
+  const venvDir = path.join(botDir, "venv");
+  const sysPython = process.env.PYTHON_CMD || (process.platform === "win32" ? "python" : "python3");
+  
+  if (!fs.existsSync(venvDir)) {
+    botLog(botId, "📦 Création de l'environnement virtuel (venv)...", "info");
+    const venv = spawn(sysPython, ["-m", "venv", "venv"], { cwd: botDir, shell: true });
+    venv.stdout.on("data", (d) => d.toString().split("\n").filter(Boolean).forEach((l) => botLog(botId, l, "log")));
+    venv.stderr.on("data", (d) => d.toString().split("\n").filter(Boolean).forEach((l) => botLog(botId, l, "error")));
+    venv.on("close", (code) => {
+      if (code !== 0) {
+        botLog(botId, "❌ Erreur lors de la création du venv", "error");
+        botStatus(botId, "error");
+        return;
+      }
+      _checkReqsAndInstall(botId, botDir, language, entry);
+    });
+  } else {
+    _checkReqsAndInstall(botId, botDir, language, entry);
+  }
+}
+
+function _checkReqsAndInstall(botId, botDir, language, entry) {
+  const reqPath = path.join(botDir, "requirements.txt");
+  const isWin = process.platform === "win32";
+  const venvPython = isWin ? path.join(botDir, "venv", "Scripts", "python") : path.join(botDir, "venv", "bin", "python");
+
+  if (!fs.existsSync(reqPath)) {
+    botLog(botId, "🔍 Génération automatique des dépendances...", "info");
+    const reqs = spawn(`${venvPython} -m pip install pipreqs && ${venvPython} -m pipreqs.pipreqs . --force`, [], { cwd: botDir, shell: true });
+    reqs.on("close", () => {
+       _installPythonDepsAndSpawn(botId, botDir, language, entry, venvPython);
+    });
+  } else {
+     _installPythonDepsAndSpawn(botId, botDir, language, entry, venvPython);
+  }
+}
+
+function _installPythonDepsAndSpawn(botId, botDir, language, entry, venvPython) {
   const reqPath = path.join(botDir, "requirements.txt");
   if (!fs.existsSync(reqPath)) {
-    // Si toujours pas de requirements.txt, c'est qu'il n'y a pas de deps externes
-    _spawnBot(botId, language, entry);
+    // Si toujours pas de requirements.txt
+    _spawnBot(botId, language, entry, venvPython);
     return;
   }
   
   botLog(botId, "📦 Installation des dépendances (pip)...", "info");
-  const pythonCmd = process.platform === "win32" ? "python" : "python3";
-  const install = spawn(pythonCmd, ["-m", "pip", "install", "-r", "requirements.txt"], { cwd: botDir, shell: true });
+  const install = spawn(venvPython, ["-m", "pip", "install", "-r", "requirements.txt"], { cwd: botDir, shell: true });
   install.stdout.on("data", (d) => d.toString().split("\n").filter(Boolean).forEach((l) => botLog(botId, l, "log")));
   install.stderr.on("data", (d) => d.toString().split("\n").filter(Boolean).forEach((l) => botLog(botId, l, "error")));
   install.on("close", (code) => {
@@ -176,11 +204,11 @@ function _installPythonDepsAndSpawn(botId, botDir, language, entry) {
       return;
     }
     botLog(botId, "✅ Dépendances installées", "info");
-    _spawnBot(botId, language, entry);
+    _spawnBot(botId, language, entry, venvPython);
   });
 }
 
-function _spawnBot(botId, language, entry) {
+function _spawnBot(botId, language, entry, venvPython = null) {
   const bot = bots[botId];
   const botDir = path.join(BOTS_DIR, botId);
 
@@ -190,8 +218,7 @@ function _spawnBot(botId, language, entry) {
     NODE_ENV: "production",
   };
 
-  const pythonCmd = process.platform === "win32" ? "python" : "python3";
-  const command = language === "python" ? pythonCmd : "node";
+  const command = language === "python" ? (venvPython || "python") : "node";
   const proc = spawn(command, [entry], { cwd: botDir, env, shell: true });
   bot.process = proc;
 
