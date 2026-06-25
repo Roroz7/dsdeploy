@@ -1,4 +1,4 @@
 providers = ["node"]
 
 [phases.setup]
-  nixPkgs = ["nodejs", "python3", "git"]
+  aptPkgs = ["python3", "python3-venv", "git"]
