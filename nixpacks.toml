@@ -1,5 +1,4 @@
-[providers]
-  providers = ["node"]
+providers = ["node"]
 
 [phases.setup]
   nixPkgs = ["nodejs", "python3", "python3-venv", "git"]
