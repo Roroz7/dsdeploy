@@ -126,20 +126,30 @@ function _continueStartBot(botId, botDir) {
   const pkgPath = path.join(botDir, "package.json");
   const reqPath = path.join(botDir, "requirements.txt");
 
-  if (language === "node" && fs.existsSync(pkgPath)) {
-    botLog(botId, "📦 Installation des dépendances (npm)...", "info");
-    const install = spawn("npm", ["install", "--silent"], { cwd: botDir, shell: true });
-    install.stdout.on("data", (d) => d.toString().split("\n").filter(Boolean).forEach((l) => botLog(botId, l, "log")));
-    install.stderr.on("data", (d) => d.toString().split("\n").filter(Boolean).forEach((l) => botLog(botId, l, "error")));
-    install.on("close", (code) => {
-      if (code !== 0) {
-        botLog(botId, "❌ npm install a échoué", "error");
-        botStatus(botId, "error");
-        return;
-      }
-      botLog(botId, "✅ Dépendances installées", "info");
-      _spawnBot(botId, language, entry);
-    });
+  if (language === "node") {
+    if (fs.existsSync(pkgPath)) {
+      botLog(botId, "📦 Installation des dépendances (npm)...", "info");
+      const install = spawn("npm", ["install", "--silent"], { cwd: botDir, shell: true });
+      install.stdout.on("data", (d) => d.toString().split("\n").filter(Boolean).forEach((l) => botLog(botId, l, "log")));
+      install.stderr.on("data", (d) => d.toString().split("\n").filter(Boolean).forEach((l) => botLog(botId, l, "error")));
+      install.on("close", (code) => {
+        if (code !== 0) {
+          botLog(botId, "❌ npm install a échoué", "error");
+          botStatus(botId, "error");
+          return;
+        }
+        botLog(botId, "✅ Dépendances installées", "info");
+        _spawnBot(botId, language, entry);
+      });
+    } else {
+      botLog(botId, "📦 Génération automatique de package.json et installation de discord.js...", "info");
+      const install = spawn("npm", ["init", "-y", "&&", "npm", "install", "discord.js", "dotenv", "--silent"], { cwd: botDir, shell: true });
+      install.stdout.on("data", (d) => d.toString().split("\n").filter(Boolean).forEach((l) => botLog(botId, l, "log")));
+      install.stderr.on("data", (d) => d.toString().split("\n").filter(Boolean).forEach((l) => botLog(botId, l, "error")));
+      install.on("close", (code) => {
+        _spawnBot(botId, language, entry);
+      });
+    }
   } else if (language === "python") {
     _setupPythonVenvAndSpawn(botId, botDir, language, entry);
   } else {
