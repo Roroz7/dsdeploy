@@ -8,25 +8,45 @@ let currentViewType = "bot";
 let authToken = localStorage.getItem("deployer_token") || null;
 let codeEditorInstance = null;
 let currentOpenedFile = null;
+let userRole = localStorage.getItem("deployer_role") || "USER";
+let chartInstance = null;
+let metricsData = { cpu: [], ram: [], labels: [] };
 
 // ── Auth & Fetch ──────────────────────────────────────────────────────────────
 async function login() {
-  const pwd = document.getElementById("loginPassword").value;
+  const username = document.getElementById("loginUsername").value;
+  const password = document.getElementById("loginPassword").value;
+  if (!username || !password) return;
   const res = await fetch("/api/login", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ password: pwd })
+    body: JSON.stringify({ username, password }),
   });
   if (res.ok) {
     const data = await res.json();
     authToken = data.token;
+    userRole = data.role;
     localStorage.setItem("deployer_token", authToken);
-    document.getElementById("loginOverlay").classList.add("hidden");
-    document.getElementById("loginError").classList.add("hidden");
-    initApp();
+    localStorage.setItem("deployer_role", userRole);
+    document.getElementById("loginOverlay").style.display = "none";
+    initUI();
+    initWs();
+    fetchBots();
   } else {
     document.getElementById("loginError").classList.remove("hidden");
   }
+}
+
+function initUI() {
+  if (userRole === "ADMIN") {
+    document.getElementById("adminTabBtn").classList.remove("hidden");
+  }
+}
+
+function logout() {
+  localStorage.removeItem("deployer_token");
+  localStorage.removeItem("deployer_role");
+  location.reload();
 }
 
 async function authFetch(url, options = {}) {
@@ -45,40 +65,36 @@ async function authFetch(url, options = {}) {
 }
 
 // ── WebSocket ─────────────────────────────────────────────────────────────────
-function connectWS() {
+function initWs() {
   if (!authToken) return;
-  const protocol = location.protocol === "https:" ? "wss" : "ws";
-  ws = new WebSocket(`${protocol}://${location.host}?token=${authToken}`);
-
-  ws.onmessage = ({ data }) => {
-    const msg = JSON.parse(data);
-
-    if (msg.event === "log") {
-      appendLog(msg.botId, msg.line, msg.type, msg.time);
-    }
-
-    if (msg.event === "status") {
-      if (botsData[msg.botId]) botsData[msg.botId].status = msg.status;
-      updateBotItem(msg.botId);
-      if (currentBotId === msg.botId) renderPanelStatus(msg.status);
-    }
-
-    if (msg.event === "deployed") {
-      fetchBots();
-      toast(`✅ Bot "${msg.name}" déployé !`, "success");
-    }
-
-    if (msg.event === "deleted") {
-      delete botsData[msg.botId];
+  const loc = window.location;
+  const wsUri = (loc.protocol === "https:" ? "wss://" : "ws://") + loc.host + "?token=" + authToken;
+  ws = new WebSocket(wsUri);
+  
+  ws.onmessage = (event) => {
+    const data = JSON.parse(event.data);
+    if (data.event === "log" && data.botId === currentBotId) {
+      appendLog(data);
+    } else if (data.event === "status") {
+      if (botsData[data.botId]) botsData[data.botId].status = data.status;
       renderBotList();
-      if (currentBotId === msg.botId) {
+      if (data.botId === currentBotId) renderPanelStatus(data.status);
+    } else if (data.event === "deployed") {
+      fetchBots();
+    } else if (data.event === "deleted") {
+      delete botsData[data.botId];
+      renderBotList();
+      if (currentBotId === data.botId) {
         currentBotId = null;
         showPlaceholder();
       }
+    } else if (data.event === "metrics") {
+      if (currentBotId && data.stats[currentBotId]) {
+        updateMetrics(data.stats[currentBotId]);
+      }
     }
   };
-
-  ws.onclose = () => setTimeout(connectWS, 2000);
+  ws.onclose = () => setTimeout(initWs, 2000);
 }
 
 // ── Fetch & render bots ───────────────────────────────────────────────────────
@@ -128,13 +144,7 @@ async function selectBot(botId) {
   renderPanelStatus(bot.status);
   renderBotList();
 
-  // Charger les logs
-  const logRes = await authFetch(`/api/bots/${botId}/logs`);
-  const logs = await logRes.json();
-  const container = document.getElementById("logContainer");
-  container.innerHTML = "";
-  logs.forEach((l) => appendLog(botId, l.line, l.type, l.time, false));
-  container.scrollTop = container.scrollHeight;
+  fetchLogs(botId);
 
   // Charger la config
   document.getElementById("cfgEntry").value = bot.entry || "";
@@ -146,11 +156,26 @@ async function selectBot(botId) {
   document.getElementById("cfgEnv").value =
     Object.keys(envCopy).length ? JSON.stringify(envCopy, null, 2) : "";
 
+  // Reset Metrics & Chart
+  metricsData = { cpu: [], ram: [], labels: [] };
+  document.getElementById("metricCpu").textContent = "CPU: 0%";
+  document.getElementById("metricRam").textContent = "RAM: 0 MB";
+  initChart();
+
   // Reset IDE
   if (codeEditorInstance) codeEditorInstance.setValue("");
   currentOpenedFile = null;
   document.getElementById("currentFileName").textContent = "Aucun fichier sélectionné";
   document.getElementById("fileList").innerHTML = "";
+}
+
+async function fetchLogs(botId) {
+  const logRes = await authFetch(`/api/bots/${botId}/logs`);
+  const logs = await logRes.json();
+  const container = document.getElementById("logContainer");
+  container.innerHTML = "";
+  logs.forEach((l) => appendLog(l));
+  container.scrollTop = container.scrollHeight;
 }
 
 function showPlaceholder() {
@@ -180,21 +205,38 @@ function renderPanelStatus(status) {
 }
 
 // ── Logs ──────────────────────────────────────────────────────────────────────
-function appendLog(botId, line, type, time, scroll = true) {
-  if (currentBotId !== botId) return;
+function appendLog(log) {
+  if (document.getElementById("logSearch").value) return;
   const container = document.getElementById("logContainer");
   const div = document.createElement("div");
-  div.className = `log-line ${type}`;
-  const t = new Date(time).toLocaleTimeString("fr-FR");
-  div.innerHTML = `<span class="log-time">${t}</span><span class="log-text">${escHtml(line)}</span>`;
+  div.className = `log-line ${log.type}`;
+  const t = new Date(log.time).toLocaleTimeString("fr-FR");
+  div.innerHTML = `<span class="log-time">${t}</span><span class="log-text">${escHtml(log.line)}</span>`;
   container.appendChild(div);
 
-  // Limite 500 lignes dans le DOM
   while (container.children.length > 500) container.removeChild(container.firstChild);
 
-  if (scroll && document.getElementById("autoScroll").checked) {
+  if (document.getElementById("autoScroll").checked) {
     container.scrollTop = container.scrollHeight;
   }
+}
+
+async function searchLogs() {
+  const q = document.getElementById("logSearch").value;
+  if (!q) {
+    await fetchLogs(currentBotId);
+    return;
+  }
+  const res = await authFetch(`/api/bots/${currentBotId}/logs/search?q=${encodeURIComponent(q)}`);
+  const logs = await res.json();
+  const container = document.getElementById("logContainer");
+  container.innerHTML = "";
+  logs.forEach(l => appendLog(l));
+}
+
+function downloadLogs() {
+  if (!currentBotId) return;
+  window.open(`/api/bots/${currentBotId}/logs/download?token=${authToken}`, "_blank");
 }
 
 function clearLogs() {
@@ -361,6 +403,10 @@ function switchSidebarTab(type) {
   document.querySelectorAll(".s-tab").forEach(t => t.classList.remove("active"));
   event.currentTarget.classList.add("active");
   
+  document.getElementById("deployZone").classList.toggle("hidden", type === "admin");
+  document.getElementById("botList").classList.toggle("hidden", type === "admin");
+  document.getElementById("adminForm").classList.toggle("hidden", type !== "admin");
+  
   document.getElementById("lblBotName").textContent = type === "bot" ? "Nom du bot" : "Nom du script";
   document.getElementById("tokenContainer").classList.toggle("hidden", type !== "bot");
   document.getElementById("cfgTokenContainer").classList.toggle("hidden", type !== "bot");
@@ -368,6 +414,23 @@ function switchSidebarTab(type) {
   cancelDeploy();
   renderBotList();
   showPlaceholder();
+}
+
+async function createUser() {
+  const username = document.getElementById("newUsername").value;
+  const password = document.getElementById("newPassword").value;
+  if (!username || !password) return toast("Remplissez les champs", "error");
+  const res = await authFetch("/api/users", {
+    method: "POST",
+    body: JSON.stringify({ username, password })
+  });
+  if (res.ok) {
+    toast("✅ Utilisateur créé !", "success");
+    document.getElementById("newUsername").value = "";
+    document.getElementById("newPassword").value = "";
+  } else {
+    toast("❌ Erreur lors de la création", "error");
+  }
 }
 
 // ── Web IDE ───────────────────────────────────────────────────────────────────
@@ -445,15 +508,62 @@ function escHtml(s) {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
+// ── Metrics Chart ─────────────────────────────────────────────────────────────
+function initChart() {
+  const ctx = document.getElementById('metricsChart').getContext('2d');
+  if (chartInstance) chartInstance.destroy();
+  chartInstance = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: metricsData.labels,
+      datasets: [
+        { label: 'CPU (%)', data: metricsData.cpu, borderColor: '#5865F2', borderWidth: 2, pointRadius: 0, tension: 0.3 },
+        { label: 'RAM (MB)', data: metricsData.ram, borderColor: '#57F287', borderWidth: 2, pointRadius: 0, tension: 0.3 }
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { display: false },
+        y: { display: false, min: 0 }
+      },
+      animation: false
+    }
+  });
+}
+
+function updateMetrics(stats) {
+  const memMB = (stats.memory / 1024 / 1024).toFixed(1);
+  const cpuPct = stats.cpu.toFixed(1);
+  
+  document.getElementById("metricCpu").textContent = `CPU: ${cpuPct}%`;
+  document.getElementById("metricRam").textContent = `RAM: ${memMB} MB`;
+  
+  metricsData.labels.push("");
+  metricsData.cpu.push(stats.cpu);
+  metricsData.ram.push(stats.memory / 1024 / 1024);
+  
+  if (metricsData.labels.length > 30) {
+    metricsData.labels.shift();
+    metricsData.cpu.shift();
+    metricsData.ram.shift();
+  }
+  
+  if (chartInstance) chartInstance.update();
+}
+
 // ── Init ──────────────────────────────────────────────────────────────────────
 function initApp() {
   if (!authToken) {
     document.getElementById("loginOverlay").classList.remove("hidden");
     return;
   }
-  document.getElementById("loginOverlay").classList.add("hidden");
+  document.getElementById("loginOverlay").style.display = "none";
+  initUI();
   initDragDrop();
-  connectWS();
+  initWs();
   fetchBots();
 }
 

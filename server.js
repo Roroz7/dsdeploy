@@ -10,9 +10,14 @@ const treeKill = require("tree-kill");
 const chokidar = require("chokidar");
 const crypto = require("crypto");
 const cron = require("node-cron");
+const jwt = require("jsonwebtoken");
+const bcrypt = require("bcrypt");
+const pidusage = require("pidusage");
+const { PrismaClient } = require("@prisma/client");
 
+const prisma = new PrismaClient();
+const JWT_SECRET = process.env.JWT_SECRET || "super_secret_deployer_key";
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "admin";
-const AUTH_TOKEN = crypto.createHash("sha256").update(ADMIN_PASSWORD + "deployer_salt").digest("hex");
 const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL || null;
 
 async function sendWebhook(title, description, color) {
@@ -49,7 +54,7 @@ function walkDir(dir, baseDir = dir) {
   return results;
 }
 
-app.get("/api/bots/:id/files", authMiddleware, (req, res) => {
+app.get("/api/bots/:id/files", authMiddleware, botOwnerMiddleware, (req, res) => {
   const botDir = path.join(BOTS_DIR, req.params.id);
   if (!fs.existsSync(botDir)) return res.status(404).json({ error: "Dossier introuvable" });
   try {
@@ -60,7 +65,7 @@ app.get("/api/bots/:id/files", authMiddleware, (req, res) => {
   }
 });
 
-app.get("/api/bots/:id/files/read", authMiddleware, (req, res) => {
+app.get("/api/bots/:id/files/read", authMiddleware, botOwnerMiddleware, (req, res) => {
   const filePath = req.query.path;
   if (!filePath || filePath.includes("..")) return res.status(400).json({ error: "Chemin invalide" });
   const fullPath = path.join(BOTS_DIR, req.params.id, filePath);
@@ -72,7 +77,7 @@ app.get("/api/bots/:id/files/read", authMiddleware, (req, res) => {
   }
 });
 
-app.put("/api/bots/:id/files/write", authMiddleware, (req, res) => {
+app.put("/api/bots/:id/files/write", authMiddleware, botOwnerMiddleware, (req, res) => {
   const filePath = req.body.path;
   const content = req.body.content;
   if (!filePath || filePath.includes("..")) return res.status(400).json({ error: "Chemin invalide" });
@@ -91,20 +96,75 @@ const wss = new ws.WebSocketServer({ server });
 app.use(express.json());
 app.use(express.static("public"));
 
-function authMiddleware(req, res, next) {
-  if (req.headers.authorization !== AUTH_TOKEN) {
-    return res.status(401).json({ error: "Non autorisé" });
+async function authMiddleware(req, res, next) {
+  const token = req.headers.authorization;
+  if (!token) return res.status(401).json({ error: "Non autorisé" });
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    req.user = await prisma.user.findUnique({ where: { id: decoded.userId } });
+    if (!req.user) throw new Error();
+    next();
+  } catch {
+    res.status(401).json({ error: "Jeton invalide" });
+  }
+}
+
+function botOwnerMiddleware(req, res, next) {
+  const bot = bots[req.params.id];
+  if (!bot) return res.status(404).json({ error: "Bot introuvable" });
+  if (req.user.role !== 'ADMIN' && bot.config.ownerId !== req.user.id) {
+    return res.status(403).json({ error: "Accès refusé" });
   }
   next();
 }
 
-app.post("/api/login", (req, res) => {
-  if (req.body.password === ADMIN_PASSWORD) {
-    res.json({ token: AUTH_TOKEN });
+app.post("/api/login", async (req, res) => {
+  const { username, password } = req.body;
+  if (!username || !password) return res.status(400).json({ error: "Identifiants manquants" });
+  
+  const user = await prisma.user.findUnique({ where: { username } });
+  if (user && await bcrypt.compare(password, user.password)) {
+    const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: '7d' });
+    res.json({ token, role: user.role, username: user.username });
   } else {
-    res.status(401).json({ error: "Mot de passe incorrect" });
+    // Rétrocompatibilité ou connexion rapide si pas d'utilisateur mais mot de passe admin via env var
+    if (username === "admin" && password === ADMIN_PASSWORD) {
+      const adminUser = await prisma.user.findUnique({ where: { username: "admin" } });
+      if (adminUser) {
+        const token = jwt.sign({ userId: adminUser.id }, JWT_SECRET, { expiresIn: '7d' });
+        return res.json({ token, role: adminUser.role, username: adminUser.username });
+      }
+    }
+    res.status(401).json({ error: "Identifiants incorrects" });
   }
 });
+
+// Admin Route: Create users
+app.post("/api/users", authMiddleware, async (req, res) => {
+  if (req.user.role !== "ADMIN") return res.status(403).json({ error: "Accès refusé" });
+  try {
+    const hashedPassword = await bcrypt.hash(req.body.password, 10);
+    const newUser = await prisma.user.create({
+      data: { username: req.body.username, password: hashedPassword, role: "USER" }
+    });
+    res.json({ ok: true, user: { id: newUser.id, username: newUser.username } });
+  } catch (err) {
+    res.status(400).json({ error: "Erreur création utilisateur (nom déjà pris ?)" });
+  }
+});
+
+// Initialiser l'admin
+async function initDb() {
+  const adminExists = await prisma.user.findUnique({ where: { username: "admin" } });
+  if (!adminExists) {
+    const hashedPassword = await bcrypt.hash(ADMIN_PASSWORD, 10);
+    await prisma.user.create({
+      data: { username: "admin", password: hashedPassword, role: "ADMIN" }
+    });
+    console.log("Compte administrateur créé par défaut (username: admin).");
+  }
+}
+initDb();
 
 // ── Dossiers ────────────────────────────────────────────────────────────────
 const BOTS_DIR = path.join(__dirname, "bots");
@@ -122,10 +182,35 @@ const storage = multer.diskStorage({
 const upload = multer({ storage, limits: { fileSize: 100 * 1024 * 1024 } });
 
 // ── WebSocket broadcast ──────────────────────────────────────────────────────
+wss.on('connection', async (socket, req) => {
+  try {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const token = url.searchParams.get("token");
+    if (token) {
+      const decoded = jwt.verify(token, JWT_SECRET);
+      socket.user = await prisma.user.findUnique({ where: { id: decoded.userId } });
+    }
+  } catch (err) {}
+});
+
 function broadcast(data) {
   const msg = JSON.stringify(data);
   wss.clients.forEach((c) => {
-    if (c.readyState === ws.WebSocket.OPEN) c.send(msg);
+    if (c.readyState !== ws.WebSocket.OPEN) return;
+    if (c.user && c.user.role !== 'ADMIN') {
+      if (data.botId && bots[data.botId] && bots[data.botId].config.ownerId !== c.user.id) return;
+      if (data.event === "metrics") {
+        const filteredStats = {};
+        for (const [bId, stat] of Object.entries(data.stats)) {
+          if (bots[bId].config.ownerId === c.user.id) filteredStats[bId] = stat;
+        }
+        if (Object.keys(filteredStats).length > 0) {
+          c.send(JSON.stringify({ event: "metrics", stats: filteredStats }));
+        }
+        return;
+      }
+    }
+    c.send(msg);
   });
 }
 
@@ -134,6 +219,10 @@ function botLog(botId, line, type = "log") {
     bots[botId].logs.push({ time: new Date().toISOString(), type, line });
     if (bots[botId].logs.length > 500) bots[botId].logs.shift();
   }
+  try {
+    const logLine = `[${new Date().toISOString()}] [${type.toUpperCase()}] ${line}\n`;
+    fs.appendFileSync(path.join(BOTS_DIR, botId, "logs.txt"), logLine);
+  } catch {}
   broadcast({ event: "log", botId, line, type, time: new Date().toISOString() });
 }
 
@@ -141,6 +230,23 @@ function botStatus(botId, status) {
   if (bots[botId]) bots[botId].status = status;
   broadcast({ event: "status", botId, status });
 }
+
+// ── Metrics (Monitoring) ──────────────────────────────────────────────────────
+setInterval(async () => {
+  const stats = {};
+  for (const botId of Object.keys(bots)) {
+    const bot = bots[botId];
+    if (bot.process) {
+      try {
+        const stat = await pidusage(bot.process.pid);
+        stats[botId] = { cpu: stat.cpu, memory: stat.memory };
+      } catch (err) {}
+    }
+  }
+  if (Object.keys(stats).length > 0) {
+    broadcast({ event: "metrics", stats });
+  }
+}, 3000);
 
 // ── Lancer un bot ────────────────────────────────────────────────────────────
 function startBot(botId) {
@@ -364,6 +470,7 @@ function loadExistingBots() {
     const config = fs.existsSync(cfgPath)
       ? JSON.parse(fs.readFileSync(cfgPath, "utf8"))
       : { name, entry: "" };
+    if (!config.ownerId) config.ownerId = 1;
     bots[name] = { process: null, status: "stopped", logs: [], config };
   });
 }
@@ -371,15 +478,22 @@ function loadExistingBots() {
 // ── Routes API ────────────────────────────────────────────────────────────────
 
 // Lister les bots
-app.get("/api/bots", authMiddleware, (_, res) => {
-  const list = Object.entries(bots).map(([id, b]) => ({
+app.get("/api/bots", authMiddleware, (req, res) => {
+  let list = Object.entries(bots).map(([id, b]) => ({
     id,
     name: b.config.name || id,
     status: b.status,
     entry: b.config.entry || "",
     autoRestart: b.config.autoRestart || false,
+    projectType: b.config.projectType || 'bot',
+    cron: b.config.cron || "",
     env: b.config.env || {},
+    ownerId: b.config.ownerId
   }));
+  
+  if (req.user.role !== 'ADMIN') {
+    list = list.filter(b => b.ownerId === req.user.id);
+  }
   res.json(list);
 });
 
@@ -387,11 +501,37 @@ app.get("/api/bots", authMiddleware, (_, res) => {
 app.get("/api/bots/:id/logs", authMiddleware, (req, res) => {
   const bot = bots[req.params.id];
   if (!bot) return res.status(404).json({ error: "Bot introuvable" });
+  if (req.user.role !== 'ADMIN' && bot.config.ownerId !== req.user.id) return res.status(403).json({ error: "Accès refusé" });
   res.json(bot.logs);
 });
 
+// Logs - Search
+app.get("/api/bots/:id/logs/search", authMiddleware, (req, res) => {
+  const bot = bots[req.params.id];
+  if (!bot) return res.status(404).json({ error: "Bot introuvable" });
+  if (req.user.role !== 'ADMIN' && bot.config.ownerId !== req.user.id) return res.status(403).json({ error: "Accès refusé" });
+  
+  const q = req.query.q?.toLowerCase();
+  if (!q) return res.json([]);
+  try {
+    const content = fs.readFileSync(path.join(BOTS_DIR, req.params.id, "logs.txt"), "utf8");
+    const lines = content.split("\n").filter(l => l.toLowerCase().includes(q)).slice(-500);
+    res.json(lines.map(l => ({ time: new Date().toISOString(), type: 'info', line: l })));
+  } catch (err) {
+    res.json([]);
+  }
+});
+
+// Logs - Download
+app.get("/api/bots/:id/logs/download", authMiddleware, (req, res) => {
+  const bot = bots[req.params.id];
+  if (!bot) return res.status(404).json({ error: "Bot introuvable" });
+  if (req.user.role !== 'ADMIN' && bot.config.ownerId !== req.user.id) return res.status(403).json({ error: "Accès refusé" });
+  res.download(path.join(BOTS_DIR, req.params.id, "logs.txt"));
+});
+
 // STDIN
-app.post("/api/bots/:id/stdin", authMiddleware, (req, res) => {
+app.post("/api/bots/:id/stdin", authMiddleware, botOwnerMiddleware, (req, res) => {
   const bot = bots[req.params.id];
   if (bot?.process) {
     bot.process.stdin.write(req.body.input + "\n");
@@ -426,6 +566,7 @@ app.post("/api/deploy", authMiddleware, upload.single("archive"), async (req, re
       ? JSON.parse(fs.readFileSync(cfgPath, "utf8"))
       : { name: rawName, entry: null, autoRestart: false, env: {} };
     config.projectType = req.body.projectType || config.projectType || 'bot';
+    config.ownerId = config.ownerId || req.user.id;
 
     if (req.body.token) config.env = { ...config.env, DISCORD_TOKEN: req.body.token };
     if (req.body.env) {
@@ -470,7 +611,7 @@ app.post("/api/deploy/github", authMiddleware, async (req, res) => {
       }
 
       const cfgPath = path.join(tmpDir, "deployer.json");
-      const config = { name: rawName, entry: "", autoRestart: false, env: {}, repoUrl, projectType: req.body.projectType || 'bot' };
+      const config = { name: rawName, entry: "", autoRestart: false, env: {}, repoUrl, projectType: req.body.projectType || 'bot', ownerId: req.user.id };
 
       if (token) config.env.DISCORD_TOKEN = token;
       if (env) {
@@ -498,21 +639,21 @@ app.post("/api/deploy/github", authMiddleware, async (req, res) => {
 });
 
 // Démarrer
-app.post("/api/bots/:id/start", authMiddleware, (req, res) => {
+app.post("/api/bots/:id/start", authMiddleware, botOwnerMiddleware, (req, res) => {
   if (!bots[req.params.id]) return res.status(404).json({ error: "Bot introuvable" });
   startBot(req.params.id);
   res.json({ ok: true });
 });
 
 // Arrêter
-app.post("/api/bots/:id/stop", authMiddleware, (req, res) => {
+app.post("/api/bots/:id/stop", authMiddleware, botOwnerMiddleware, (req, res) => {
   if (!bots[req.params.id]) return res.status(404).json({ error: "Bot introuvable" });
   stopBot(req.params.id);
   res.json({ ok: true });
 });
 
 // Redémarrer
-app.post("/api/bots/:id/restart", authMiddleware, async (req, res) => {
+app.post("/api/bots/:id/restart", authMiddleware, botOwnerMiddleware, async (req, res) => {
   if (!bots[req.params.id]) return res.status(404).json({ error: "Bot introuvable" });
   stopBot(req.params.id);
   await new Promise((r) => setTimeout(r, 1000));
@@ -521,7 +662,7 @@ app.post("/api/bots/:id/restart", authMiddleware, async (req, res) => {
 });
 
 // Supprimer
-app.delete("/api/bots/:id", authMiddleware, (req, res) => {
+app.delete("/api/bots/:id", authMiddleware, botOwnerMiddleware, (req, res) => {
   const botId = req.params.id;
   if (!bots[botId]) return res.status(404).json({ error: "Bot introuvable" });
   stopBot(botId);
@@ -535,7 +676,7 @@ app.delete("/api/bots/:id", authMiddleware, (req, res) => {
 });
 
 // Mettre à jour la Config
-app.patch("/api/bots/:id/config", authMiddleware, (req, res) => {
+app.patch("/api/bots/:id/config", authMiddleware, botOwnerMiddleware, (req, res) => {
   const bot = bots[req.params.id];
   if (!bot) return res.status(404).json({ error: "Bot introuvable" });
 
