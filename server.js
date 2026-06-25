@@ -8,6 +8,10 @@ const { spawn } = require("child_process");
 const extract = require("extract-zip");
 const treeKill = require("tree-kill");
 const chokidar = require("chokidar");
+const crypto = require("crypto");
+
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "admin";
+const AUTH_TOKEN = crypto.createHash("sha256").update(ADMIN_PASSWORD + "deployer_salt").digest("hex");
 
 const app = express();
 const server = http.createServer(app);
@@ -15,6 +19,21 @@ const wss = new ws.WebSocketServer({ server });
 
 app.use(express.json());
 app.use(express.static("public"));
+
+function authMiddleware(req, res, next) {
+  if (req.headers.authorization !== AUTH_TOKEN) {
+    return res.status(401).json({ error: "Non autorisé" });
+  }
+  next();
+}
+
+app.post("/api/login", (req, res) => {
+  if (req.body.password === ADMIN_PASSWORD) {
+    res.json({ token: AUTH_TOKEN });
+  } else {
+    res.status(401).json({ error: "Mot de passe incorrect" });
+  }
+});
 
 // ── Dossiers ────────────────────────────────────────────────────────────────
 const BOTS_DIR = path.join(__dirname, "bots");
@@ -198,15 +217,12 @@ function _checkReqsAndInstall(botId, botDir, language, entry) {
 function _installPythonDepsAndSpawn(botId, botDir, language, entry, venvPython) {
   const reqPath = path.join(botDir, "requirements.txt");
   if (!fs.existsSync(reqPath)) {
-    // Si toujours pas de requirements.txt
     _spawnBot(botId, language, entry, venvPython);
     return;
   }
   
   botLog(botId, "📦 Installation des dépendances (pip)...", "info");
   const install = spawn(venvPython, ["-m", "pip", "install", "-r", "requirements.txt"], { cwd: botDir, shell: true });
-  install.stdout.on("data", (d) => d.toString().split("\n").filter(Boolean).forEach((l) => botLog(botId, l, "log")));
-  install.stderr.on("data", (d) => d.toString().split("\n").filter(Boolean).forEach((l) => botLog(botId, l, "error")));
   install.on("close", (code) => {
     if (code !== 0) {
       botLog(botId, "❌ pip install a échoué", "error");
@@ -246,7 +262,6 @@ function _spawnBot(botId, language, entry, venvPython = null) {
     botLog(botId, `⏹ Processus terminé (code ${code})`, crashed ? "error" : "info");
     botStatus(botId, crashed ? "crashed" : "stopped");
 
-    // Auto-restart si activé
     if (crashed && bot.config.autoRestart) {
       botLog(botId, "🔄 Redémarrage automatique dans 3s...", "info");
       setTimeout(() => startBot(botId), 3000);
@@ -279,7 +294,7 @@ function loadExistingBots() {
 // ── Routes API ────────────────────────────────────────────────────────────────
 
 // Lister les bots
-app.get("/api/bots", (_, res) => {
+app.get("/api/bots", authMiddleware, (_, res) => {
   const list = Object.entries(bots).map(([id, b]) => ({
     id,
     name: b.config.name || id,
@@ -292,14 +307,14 @@ app.get("/api/bots", (_, res) => {
 });
 
 // Logs d'un bot
-app.get("/api/bots/:id/logs", (req, res) => {
+app.get("/api/bots/:id/logs", authMiddleware, (req, res) => {
   const bot = bots[req.params.id];
   if (!bot) return res.status(404).json({ error: "Bot introuvable" });
   res.json(bot.logs);
 });
 
 // Déployer un bot (upload ZIP)
-app.post("/api/deploy", upload.single("archive"), async (req, res) => {
+app.post("/api/deploy", authMiddleware, upload.single("archive"), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: "Aucun fichier" });
 
   const rawName = req.body.name || path.basename(req.file.originalname, ".zip");
@@ -307,16 +322,13 @@ app.post("/api/deploy", upload.single("archive"), async (req, res) => {
   const botDir = path.join(BOTS_DIR, botId);
 
   try {
-    // Stopper l'ancienne instance si elle tourne
     if (bots[botId]?.process) stopBot(botId);
     await new Promise((r) => setTimeout(r, 500));
 
-    // Extraire le ZIP
     fs.mkdirSync(botDir, { recursive: true });
     await extract(req.file.path, { dir: botDir });
     fs.unlinkSync(req.file.path);
 
-    // Si le ZIP contient un sous-dossier unique, on remonte d'un niveau
     const contents = fs.readdirSync(botDir);
     if (contents.length === 1) {
       const sub = path.join(botDir, contents[0]);
@@ -328,13 +340,16 @@ app.post("/api/deploy", upload.single("archive"), async (req, res) => {
       }
     }
 
-    // Lire ou créer deployer.json
     const cfgPath = path.join(botDir, "deployer.json");
     const config = fs.existsSync(cfgPath)
       ? JSON.parse(fs.readFileSync(cfgPath, "utf8"))
-      : { name: rawName, entry: "", autoRestart: false, env: {} };
-
-    // Injecter les variables d'env supplémentaires depuis le form
+      : {
+          name: rawName,
+          entry: null,
+          autoRestart: false,
+          env: {},
+        };
+    config.projectType = req.body.projectType || config.projectType || 'bot';
     if (req.body.token) config.env = { ...config.env, DISCORD_TOKEN: req.body.token };
     if (req.body.env) {
       try {
@@ -356,7 +371,7 @@ app.post("/api/deploy", upload.single("archive"), async (req, res) => {
 });
 
 // Déployer un bot (depuis GitHub)
-app.post("/api/deploy/github", async (req, res) => {
+app.post("/api/deploy/github", authMiddleware, async (req, res) => {
   const { repoUrl, name, token, env } = req.body;
   if (!repoUrl) return res.status(400).json({ error: "URL GitHub manquante" });
 
@@ -379,7 +394,7 @@ app.post("/api/deploy/github", async (req, res) => {
       }
 
       const cfgPath = path.join(botDir, "deployer.json");
-      const config = { name: rawName, entry: "", autoRestart: false, env: {}, repoUrl };
+      const config = { name: rawName, entry: "", autoRestart: false, env: {}, repoUrl, projectType: req.body.projectType || 'bot' };
 
       if (token) config.env.DISCORD_TOKEN = token;
       if (env) {
@@ -402,21 +417,21 @@ app.post("/api/deploy/github", async (req, res) => {
 });
 
 // Démarrer
-app.post("/api/bots/:id/start", (req, res) => {
+app.post("/api/bots/:id/start", authMiddleware, (req, res) => {
   if (!bots[req.params.id]) return res.status(404).json({ error: "Bot introuvable" });
   startBot(req.params.id);
   res.json({ ok: true });
 });
 
 // Arrêter
-app.post("/api/bots/:id/stop", (req, res) => {
+app.post("/api/bots/:id/stop", authMiddleware, (req, res) => {
   if (!bots[req.params.id]) return res.status(404).json({ error: "Bot introuvable" });
   stopBot(req.params.id);
   res.json({ ok: true });
 });
 
 // Redémarrer
-app.post("/api/bots/:id/restart", async (req, res) => {
+app.post("/api/bots/:id/restart", authMiddleware, async (req, res) => {
   if (!bots[req.params.id]) return res.status(404).json({ error: "Bot introuvable" });
   stopBot(req.params.id);
   await new Promise((r) => setTimeout(r, 1000));
@@ -425,7 +440,7 @@ app.post("/api/bots/:id/restart", async (req, res) => {
 });
 
 // Supprimer
-app.delete("/api/bots/:id", (req, res) => {
+app.delete("/api/bots/:id", authMiddleware, (req, res) => {
   const botId = req.params.id;
   if (!bots[botId]) return res.status(404).json({ error: "Bot introuvable" });
   stopBot(botId);

@@ -344,3 +344,54 @@ body {
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+/* ── Login Overlay ── */
+.login-overlay {
+  position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(13, 15, 19, 0.95);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 9999;
+}
+.login-box {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 32px;
+  width: 400px;
+  max-width: 90%;
+  display: flex; flex-direction: column; gap: 16px;
+  text-align: center;
+}
+.login-box p { color: var(--text-muted); font-size: 14px; }
+.login-box input {
+  background: var(--log-bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 12px;
+  font-size: 15px;
+  text-align: center;
+  outline: none;
+}
+.login-box input:focus { border-color: var(--accent); }
+.login-error { color: var(--red) !important; font-size: 13px !important; }
+
+/* ── Sidebar Tabs ── */
+.sidebar-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+}
+.s-tab {
+  flex: 1;
+  background: none;
+  border: none;
+  padding: 12px;
+  color: var(--text-muted);
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: .2s;
+}
+.s-tab.active { color: var(--text); border-color: var(--accent); background: rgba(88,101,242,.05); }
+.s-tab:hover:not(.active) { color: var(--text); background: var(--surface2); }

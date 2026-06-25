@@ -4,11 +4,49 @@ let isGithubDeploy = false;
 let currentBotId = null;
 let botsData = {};
 let ws;
+let currentViewType = "bot";
+let authToken = localStorage.getItem("deployer_token") || null;
+
+// ── Auth & Fetch ──────────────────────────────────────────────────────────────
+async function login() {
+  const pwd = document.getElementById("loginPassword").value;
+  const res = await fetch("/api/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ password: pwd })
+  });
+  if (res.ok) {
+    const data = await res.json();
+    authToken = data.token;
+    localStorage.setItem("deployer_token", authToken);
+    document.getElementById("loginOverlay").classList.add("hidden");
+    document.getElementById("loginError").classList.add("hidden");
+    initApp();
+  } else {
+    document.getElementById("loginError").classList.remove("hidden");
+  }
+}
+
+async function authFetch(url, options = {}) {
+  if (!options.headers) options.headers = {};
+  if (!(options.body instanceof FormData) && !options.headers["Content-Type"]) {
+    options.headers["Content-Type"] = "application/json";
+  }
+  if (authToken) options.headers["Authorization"] = authToken;
+  
+  const res = await fetch(url, options);
+  if (res.status === 401) {
+    document.getElementById("loginOverlay").classList.remove("hidden");
+    throw new Error("Non autorisé");
+  }
+  return res;
+}
 
 // ── WebSocket ─────────────────────────────────────────────────────────────────
 function connectWS() {
+  if (!authToken) return;
   const protocol = location.protocol === "https:" ? "wss" : "ws";
-  ws = new WebSocket(`${protocol}://${location.host}`);
+  ws = new WebSocket(`${protocol}://${location.host}?token=${authToken}`);
 
   ws.onmessage = ({ data }) => {
     const msg = JSON.parse(data);
@@ -43,7 +81,7 @@ function connectWS() {
 
 // ── Fetch & render bots ───────────────────────────────────────────────────────
 async function fetchBots() {
-  const res = await fetch("/api/bots");
+  const res = await authFetch("/api/bots");
   const list = await res.json();
   botsData = {};
   list.forEach((b) => (botsData[b.id] = b));
@@ -52,9 +90,9 @@ async function fetchBots() {
 
 function renderBotList() {
   const el = document.getElementById("botList");
-  const ids = Object.keys(botsData);
+  const ids = Object.keys(botsData).filter(id => (botsData[id].projectType || 'bot') === currentViewType);
   if (ids.length === 0) {
-    el.innerHTML = '<p class="empty-list">Aucun bot déployé</p>';
+    el.innerHTML = `<p class="empty-list">Aucun ${currentViewType === 'bot' ? 'bot déployé' : 'script déployé'}</p>`;
     return;
   }
   el.innerHTML = ids
@@ -89,7 +127,7 @@ async function selectBot(botId) {
   renderBotList();
 
   // Charger les logs
-  const logRes = await fetch(`/api/bots/${botId}/logs`);
+  const logRes = await authFetch(`/api/bots/${botId}/logs`);
   const logs = await logRes.json();
   const container = document.getElementById("logContainer");
   container.innerHTML = "";
@@ -157,13 +195,13 @@ function clearLogs() {
 // ── Actions bot ───────────────────────────────────────────────────────────────
 async function actionBot(action) {
   if (!currentBotId) return;
-  await fetch(`/api/bots/${currentBotId}/${action}`, { method: "POST" });
+  await authFetch(`/api/bots/${currentBotId}/${action}`, { method: "POST" });
 }
 
 async function deleteBot() {
   if (!currentBotId) return;
-  if (!confirm(`Supprimer le bot "${botsData[currentBotId]?.name}" ?`)) return;
-  await fetch(`/api/bots/${currentBotId}`, { method: "DELETE" });
+  if (!confirm(`Supprimer le projet "${botsData[currentBotId]?.name}" ?`)) return;
+  await authFetch(`/api/bots/${currentBotId}`, { method: "DELETE" });
 }
 
 // ── Config ────────────────────────────────────────────────────────────────────
@@ -181,9 +219,8 @@ async function saveConfig() {
   }
   if (token) env.DISCORD_TOKEN = token;
 
-  await fetch(`/api/bots/${currentBotId}/config`, {
+  await authFetch(`/api/bots/${currentBotId}/config`, {
     method: "PATCH",
-    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ entry, autoRestart, env }),
   });
 
@@ -196,7 +233,7 @@ async function saveConfig() {
 // ── Deploy ────────────────────────────────────────────────────────────────────
 function showGithubForm() {
   isGithubDeploy = true;
-  document.getElementById("formTitle").textContent = "Déployer depuis GitHub";
+  document.getElementById("formTitle").textContent = currentViewType === 'bot' ? "Déployer depuis GitHub" : "Déployer un script (GitHub)";
   document.getElementById("githubUrlContainer").classList.remove("hidden");
   document.getElementById("botName").value = "";
   document.getElementById("deployZone").classList.add("hidden");
@@ -229,10 +266,9 @@ async function deployBot() {
       return;
     }
     
-    res = await fetch("/api/deploy/github", {
+    res = await authFetch("/api/deploy/github", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ repoUrl, name, token, env: envRaw })
+      body: JSON.stringify({ repoUrl, name, token, env: envRaw, projectType: currentViewType })
     });
   } else {
     if (!selectedFile) return;
@@ -243,7 +279,9 @@ async function deployBot() {
     if (token) fd.append("token", token);
     if (envRaw) fd.append("env", envRaw);
 
-    res = await fetch("/api/deploy", { method: "POST", body: fd });
+    fd.append("projectType", currentViewType);
+
+    res = await authFetch("/api/deploy", { method: "POST", body: fd });
   }
 
   data = await res.json();
@@ -286,11 +324,26 @@ function initDragDrop() {
 function handleFile(file) {
   isGithubDeploy = false;
   selectedFile = file;
-  document.getElementById("formTitle").textContent = "Déployer un bot (ZIP)";
+  document.getElementById("formTitle").textContent = currentViewType === 'bot' ? "Déployer un bot (ZIP)" : "Déployer un script (ZIP)";
   document.getElementById("githubUrlContainer").classList.add("hidden");
   document.getElementById("botName").value = file.name.replace(".zip", "");
   document.getElementById("deployZone").classList.add("hidden");
   document.getElementById("uploadForm").classList.remove("hidden");
+}
+
+// ── Sidebar Switch ────────────────────────────────────────────────────────────
+function switchSidebarTab(type) {
+  currentViewType = type;
+  document.querySelectorAll(".s-tab").forEach(t => t.classList.remove("active"));
+  event.currentTarget.classList.add("active");
+  
+  document.getElementById("lblBotName").textContent = type === "bot" ? "Nom du bot" : "Nom du script";
+  document.getElementById("tokenContainer").classList.toggle("hidden", type !== "bot");
+  document.getElementById("cfgTokenContainer").classList.toggle("hidden", type !== "bot");
+  
+  cancelDeploy();
+  renderBotList();
+  showPlaceholder();
 }
 
 // ── Tabs ──────────────────────────────────────────────────────────────────────
@@ -316,6 +369,15 @@ function escHtml(s) {
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────
-initDragDrop();
-connectWS();
-fetchBots();
+function initApp() {
+  if (!authToken) {
+    document.getElementById("loginOverlay").classList.remove("hidden");
+    return;
+  }
+  document.getElementById("loginOverlay").classList.add("hidden");
+  initDragDrop();
+  connectWS();
+  fetchBots();
+}
+
+initApp();

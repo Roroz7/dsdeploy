@@ -13,6 +13,11 @@
       <span>Discord<br/><b>Deployer</b></span>
     </div>
 
+    <div class="sidebar-tabs" id="sidebarTabs">
+      <button class="s-tab active" onclick="switchSidebarTab('bot')">🤖 Bots</button>
+      <button class="s-tab" onclick="switchSidebarTab('script')">📜 Scripts</button>
+    </div>
+
     <div class="deploy-zone" id="deployZone">
       <div class="dz-inner" id="dzInner">
         <div class="dz-icon">📦</div>
@@ -36,10 +41,14 @@
         <input type="text" id="repoUrl" placeholder="https://github.com/user/repo" />
       </div>
 
-      <label>Nom du bot</label>
-      <input type="text" id="botName" placeholder="mon-bot" />
-      <label>Token Discord <span class="opt">(optionnel)</span></label>
-      <input type="password" id="botToken" placeholder="votre token" />
+      <label id="lblBotName">Nom du bot</label>
+      <input type="text" id="botName" placeholder="mon-projet" />
+      
+      <div id="tokenContainer">
+        <label>Token Discord <span class="opt">(optionnel)</span></label>
+        <input type="password" id="botToken" placeholder="votre token" />
+      </div>
+      
       <label>Variables d'env <span class="opt">(JSON)</span></label>
       <textarea id="botEnv" placeholder='{"PREFIX": "!", "GUILD_ID": "..."}'></textarea>
       <div class="form-actions">
@@ -97,8 +106,10 @@
         <div class="config-form">
           <label>Fichier d'entrée</label>
           <input type="text" id="cfgEntry" placeholder="Auto-détecté (main.py, index.js...)" />
-          <label>Token Discord</label>
-          <input type="password" id="cfgToken" placeholder="votre token" />
+          <div id="cfgTokenContainer">
+            <label>Token Discord</label>
+            <input type="password" id="cfgToken" placeholder="votre token" />
+          </div>
           <label>Variables d'environnement (JSON)</label>
           <textarea id="cfgEnv" rows="6" placeholder='{"PREFIX": "!", "GUILD_ID": "..."}'></textarea>
           <label>
@@ -112,6 +123,18 @@
   </div>
 
   <div id="toast" class="toast hidden"></div>
+
+  <!-- Login Overlay -->
+  <div id="loginOverlay" class="login-overlay">
+    <div class="login-box">
+      <h2>Authentification</h2>
+      <p>Veuillez entrer le mot de passe pour accéder au tableau de bord.</p>
+      <input type="password" id="loginPassword" placeholder="Mot de passe" />
+      <button class="btn btn-primary" onclick="login()">Se connecter</button>
+      <p id="loginError" class="login-error hidden">Mot de passe incorrect</p>
+    </div>
+  </div>
+
   <script src="app.js"></script>
 </body>
 </html>
